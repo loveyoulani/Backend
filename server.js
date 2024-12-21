@@ -73,7 +73,11 @@ app.patch('/api/thoughts/:id/react', async (req, res) => {
         res.status(400).json({ message: error.message });
     }
 });
-
+app.use(cors({
+    origin: '*',  // Or specify your frontend domain
+    methods: ['GET', 'POST', 'PATCH', 'DELETE'],
+    credentials: true
+}));
 const PORT = process.env.PORT || 3000;
 
 mongoose.connect(process.env.MONGODB_URI)

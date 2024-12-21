@@ -1,6 +1,8 @@
 const express = require('express');
 const cors = require('cors');
 const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
 require('dotenv').config();
 
 const app = express();
@@ -13,33 +15,188 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// MongoDB Schema
-const thoughtSchema = new mongoose.Schema({
-    title: { type: String, required: true },
-    text: { type: String, required: true },
-    type: { type: String, required: true },
-    date: { type: String, required: true },
-    views: { type: Number, default: 0 },
-    reactions: { type: Map, of: Number, default: {} },
-    timestamp: { type: Number, required: true }
+// MongoDB Schemas
+const userSchema = new mongoose.Schema({
+    username: { 
+        type: String, 
+        required: true, 
+        unique: true 
+    },
+    password: { 
+        type: String, 
+        required: true 
+    },
+    isAdmin: { 
+        type: Boolean, 
+        default: false 
+    },
+    createdAt: { 
+        type: Date, 
+        default: Date.now 
+    }
 });
 
+const thoughtSchema = new mongoose.Schema({
+    title: { 
+        type: String, 
+        required: true 
+    },
+    text: { 
+        type: String, 
+        required: true 
+    },
+    type: { 
+        type: String, 
+        required: true,
+        enum: ['thought', 'poem', 'quote', 'story']
+    },
+    author: {
+        type: String,
+        required: true
+    },
+    date: { 
+        type: String, 
+        required: true 
+    },
+    views: { 
+        type: Number, 
+        default: 0 
+    },
+    reactions: { 
+        type: Map, 
+        of: Number, 
+        default: {} 
+    },
+    timestamp: { 
+        type: Number, 
+        required: true 
+    }
+});
+
+const User = mongoose.model('User', userSchema);
 const Thought = mongoose.model('Thought', thoughtSchema);
 
-// Root route
-app.get('/', (req, res) => {
-    res.json({ 
-        message: 'Welcome to ThoughtShare API',
-        endpoints: {
-            getAllThoughts: 'GET /api/thoughts',
-            createThought: 'POST /api/thoughts',
-            updateViews: 'PATCH /api/thoughts/:id/view',
-            addReaction: 'PATCH /api/thoughts/:id/react'
+// Auth Middleware
+const authMiddleware = async (req, res, next) => {
+    try {
+        const token = req.headers.authorization?.split(' ')[1];
+        if (!token) {
+            return res.status(401).json({ message: 'No auth token' });
         }
-    });
+        
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        req.user = decoded;
+        next();
+    } catch (error) {
+        res.status(401).json({ message: 'Invalid token' });
+    }
+};
+
+// Admin Middleware
+const adminMiddleware = async (req, res, next) => {
+    if (!req.user?.isAdmin) {
+        return res.status(403).json({ message: 'Admin access required' });
+    }
+    next();
+};
+
+// Content Validation
+const containsSpam = (text) => {
+    // Check for URLs
+    const urlRegex = /(https?:\/\/[^\s]+)/g;
+    if (urlRegex.test(text)) return true;
+
+    // Check for email addresses
+    const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+    if (emailRegex.test(text)) return true;
+
+    // Check for phone numbers
+    const phoneRegex = /(\+\d{1,3}[-.]?)?\(?\d{3}\)?[-.]?\d{3}[-.]?\d{4}/g;
+    if (phoneRegex.test(text)) return true;
+
+    // Check for common spam phrases
+    const spamPhrases = [
+        'buy now', 'click here', 'free offer', 'limited time',
+        'make money', 'winner', 'discount', 'subscribe'
+    ];
+    return spamPhrases.some(phrase => 
+        text.toLowerCase().includes(phrase.toLowerCase())
+    );
+};
+
+// Generate random nickname
+const generateNickname = () => {
+    const adjectives = ['Happy', 'Clever', 'Brave', 'Gentle', 'Kind', 'Swift'];
+    const nouns = ['Panda', 'Fox', 'Eagle', 'Dolphin', 'Tiger', 'Owl'];
+    return `${adjectives[Math.floor(Math.random() * adjectives.length)]}${nouns[Math.floor(Math.random() * nouns.length)]}${Math.floor(Math.random() * 1000)}`;
+};
+
+// Auth Routes
+app.post('/api/auth/register', async (req, res) => {
+    try {
+        const { username, password, isAdmin } = req.body;
+        
+        // Check if user exists
+        const existingUser = await User.findOne({ username });
+        if (existingUser) {
+            return res.status(400).json({ message: 'Username already exists' });
+        }
+        
+        // Hash password
+        const hashedPassword = await bcrypt.hash(password, 10);
+        
+        // Create user
+        const user = new User({
+            username,
+            password: hashedPassword,
+            isAdmin: isAdmin && process.env.ADMIN_SECRET === req.body.adminSecret
+        });
+        
+        await user.save();
+        
+        // Generate token
+        const token = jwt.sign(
+            { id: user._id, username: user.username, isAdmin: user.isAdmin },
+            process.env.JWT_SECRET,
+            { expiresIn: '24h' }
+        );
+        
+        res.status(201).json({ token });
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
 });
 
-// Get all thoughts
+app.post('/api/auth/login', async (req, res) => {
+    try {
+        const { username, password } = req.body;
+        
+        // Find user
+        const user = await User.findOne({ username });
+        if (!user) {
+            return res.status(401).json({ message: 'Invalid credentials' });
+        }
+        
+        // Verify password
+        const isValidPassword = await bcrypt.compare(password, user.password);
+        if (!isValidPassword) {
+            return res.status(401).json({ message: 'Invalid credentials' });
+        }
+        
+        // Generate token
+        const token = jwt.sign(
+            { id: user._id, username: user.username, isAdmin: user.isAdmin },
+            process.env.JWT_SECRET,
+            { expiresIn: '24h' }
+        );
+        
+        res.json({ token });
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+});
+
+// Thought Routes
 app.get('/api/thoughts', async (req, res) => {
     try {
         const thoughts = await Thought.find().sort({ timestamp: -1 });
@@ -49,13 +206,22 @@ app.get('/api/thoughts', async (req, res) => {
     }
 });
 
-// Create new thought
-app.post('/api/thoughts', async (req, res) => {
-    const thought = new Thought({
-        ...req.body,
-        timestamp: Date.now()
-    });
+app.post('/api/thoughts', authMiddleware, async (req, res) => {
     try {
+        const { title, text, type } = req.body;
+        
+        // Spam detection
+        if (containsSpam(title) || containsSpam(text)) {
+            return res.status(400).json({ message: 'Content contains spam or inappropriate content' });
+        }
+        
+        // Create thought with author
+        const thought = new Thought({
+            ...req.body,
+            author: req.body.author || generateNickname(),
+            timestamp: Date.now()
+        });
+        
         const newThought = await thought.save();
         res.status(201).json(newThought);
     } catch (error) {
@@ -63,13 +229,13 @@ app.post('/api/thoughts', async (req, res) => {
     }
 });
 
-// Update view count
 app.patch('/api/thoughts/:id/view', async (req, res) => {
     try {
         const thought = await Thought.findById(req.params.id);
         if (!thought) {
             return res.status(404).json({ message: 'Thought not found' });
         }
+        
         thought.views = (thought.views || 0) + 1;
         await thought.save();
         res.json(thought);
@@ -78,8 +244,7 @@ app.patch('/api/thoughts/:id/view', async (req, res) => {
     }
 });
 
-// Add reaction
-app.patch('/api/thoughts/:id/react', async (req, res) => {
+app.patch('/api/thoughts/:id/react', authMiddleware, async (req, res) => {
     try {
         const thought = await Thought.findById(req.params.id);
         if (!thought) {
@@ -97,6 +262,32 @@ app.patch('/api/thoughts/:id/react', async (req, res) => {
         res.json(thought);
     } catch (error) {
         res.status(400).json({ message: error.message });
+    }
+});
+
+// Admin Routes
+app.delete('/api/thoughts/:id', authMiddleware, adminMiddleware, async (req, res) => {
+    try {
+        const thought = await Thought.findByIdAndDelete(req.params.id);
+        if (!thought) {
+            return res.status(404).json({ message: 'Thought not found' });
+        }
+        res.json({ message: 'Thought deleted successfully' });
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+});
+
+app.get('/api/admin/dashboard', authMiddleware, adminMiddleware, async (req, res) => {
+    try {
+        const stats = {
+            totalThoughts: await Thought.countDocuments(),
+            totalUsers: await User.countDocuments(),
+            recentThoughts: await Thought.find().sort({ timestamp: -1 }).limit(10)
+        };
+        res.json(stats);
+    } catch (error) {
+        res.status(500).json({ message: error.message });
     }
 });
 

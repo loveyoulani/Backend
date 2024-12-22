@@ -3,11 +3,18 @@ const cors = require('cors');
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const rateLimit = require('express-rate-limit');
 require('dotenv').config();
 
 const app = express();
 
-// Middleware
+// Rate limiting
+const limiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 100 // limit each IP to 100 requests per windowMs
+});
+
+app.use(limiter);
 app.use(cors({
     origin: '*',
     methods: ['GET', 'POST', 'PATCH', 'DELETE'],
@@ -15,178 +22,162 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// Modified MongoDB Schemas
-const userSchema = new mongoose.Schema({
-    username: { 
-        type: String, 
-        required: true, 
-        unique: true 
-    },
-    password: { 
-        type: String, 
-        required: true 
-    },
-    isAdmin: { 
-        type: Boolean, 
-        default: false 
-    },
-    createdAt: { 
-        type: Date, 
-        default: Date.now 
-    },
-    // New fields for user preferences
-    viewHistory: [{
-        thoughtId: { type: mongoose.Schema.Types.ObjectId, ref: 'Thought' },
-        timestamp: { type: Date, default: Date.now }
-    }],
-    tagPreferences: {
-        type: Map,
-        of: Number,
-        default: {}
-    }
-});
-
-const thoughtSchema = new mongoose.Schema({
-    title: { 
-        type: String,
-        required: function() {
-            return this.type === 'story' || this.type === 'poem';
-        }
-    },
-    text: { 
-        type: String, 
-        required: true 
-    },
-    type: { 
-        type: String, 
-        required: true,
-        enum: ['thought', 'poem', 'quote', 'story']
-    },
-    tags: [{
-        type: String,
-        required: true
-    }],
-    author: {
-        type: String,
-        required: true
-    },
-    date: { 
-        type: String, 
-        required: true 
-    },
-    views: { 
-        type: Number, 
-        default: 0 
-    },
-    reactions: { 
-        type: Map, 
-        of: [{
-            userId: String,
-            emoji: String
-        }],
-        default: {} 
-    },
-    timestamp: { 
-        type: Number, 
-        required: true 
-    }
-});
-
-const User = mongoose.model('User', userSchema);
-const Thought = mongoose.model('Thought', thoughtSchema);
-
-// Auth Middleware
-const authMiddleware = async (req, res, next) => {
-    try {
-        const token = req.headers.authorization?.split(' ')[1];
-        if (!token) {
-            return res.status(401).json({ message: 'No auth token' });
-        }
-        
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        req.user = decoded;
-        next();
-    } catch (error) {
-        res.status(401).json({ message: 'Invalid token' });
-    }
-};
-
-// Admin Middleware
-const adminMiddleware = async (req, res, next) => {
-    if (!req.user?.isAdmin) {
-        return res.status(403).json({ message: 'Admin access required' });
-    }
-    next();
-};
-
-// Content Validation
-const containsSpam = (text) => {
-    // Check for URLs
-    const urlRegex = /(https?:\/\/[^\s]+)/g;
-    if (urlRegex.test(text)) return true;
-
-    // Check for email addresses
-    const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
-    if (emailRegex.test(text)) return true;
-
-    // Check for phone numbers
-    const phoneRegex = /(\+\d{1,3}[-.]?)?\(?\d{3}\)?[-.]?\d{3}[-.]?\d{4}/g;
-    if (phoneRegex.test(text)) return true;
-
-    // Check for common spam phrases
-    const spamPhrases = [
+// Enhanced spam detection system
+const spamDetection = {
+    // Patterns for detecting repetitive characters
+    repetitivePattern: /(.)\1{4,}/,  // Matches 5 or more of the same character
+    
+    // Pattern for excessive caps
+    excessiveCaps: /[A-Z]{5,}/,
+    
+    // Common spam phrases - expanded list
+    spamPhrases: [
         'buy now', 'click here', 'free offer', 'limited time',
-        'make money', 'winner', 'discount', 'subscribe'
-    ];
-    return spamPhrases.some(phrase => 
-        text.toLowerCase().includes(phrase.toLowerCase())
-    );
+        'make money', 'winner', 'discount', 'subscribe',
+        'order now', 'act now', 'call now', 'apply now',
+        'prescription', 'medication', 'casino', 'loan',
+        'investment', 'bitcoin', 'crypto', 'lottery',
+        'warranty', 'free money', 'work from home'
+    ],
+
+    // URLs and contact information patterns
+    urlPattern: /(https?:\/\/[^\s]+)/g,
+    emailPattern: /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g,
+    phonePattern: /(\+\d{1,3}[-.]?)?\(?\d{3}\)?[-.]?\d{3}[-.]?\d{4}/g,
+    
+    // Character ratio checks
+    getCharacterRatios(text) {
+        const total = text.length;
+        if (total === 0) return { caps: 0, special: 0 };
+        
+        const caps = (text.match(/[A-Z]/g) || []).length / total;
+        const special = (text.match(/[^a-zA-Z0-9\s]/g) || []).length / total;
+        
+        return { caps, special };
+    },
+    
+    // Entropy calculation for randomness detection
+    calculateEntropy(text) {
+        const freq = {};
+        for (let char of text) {
+            freq[char] = (freq[char] || 0) + 1;
+        }
+        
+        return Object.values(freq).reduce((entropy, count) => {
+            const p = count / text.length;
+            return entropy - (p * Math.log2(p));
+        }, 0);
+    },
+
+    // Main spam detection function
+    containsSpam(text, isComment = false) {
+        // Skip empty content
+        if (!text || text.trim().length === 0) return false;
+        
+        // Allow common internet expressions and emoticons
+        const allowedPatterns = [
+            /x+d+/i,  // Matches xd, xdd, etc.
+            /l+o+l+/i,  // Matches lol, loool, etc.
+            /h+a+h+a+/i,  // Matches haha, hahaha, etc.
+            /:\)|:\(|:D|:P|XD|<3/  // Common emoticons
+        ];
+        
+        // Remove allowed patterns temporarily for spam checking
+        let sanitizedText = text;
+        allowedPatterns.forEach(pattern => {
+            sanitizedText = sanitizedText.replace(pattern, '');
+        });
+        
+        // Get character ratios
+        const ratios = this.getCharacterRatios(sanitizedText);
+        const entropy = this.calculateEntropy(sanitizedText);
+        
+        // Spam detection rules
+        const isSpam = (
+            // Check for repetitive patterns (unless it's an allowed pattern)
+            this.repetitivePattern.test(sanitizedText) ||
+            
+            // Check for excessive caps (more than 50% caps)
+            ratios.caps > 0.5 ||
+            
+            // Check for excessive special characters (more than 30%)
+            ratios.special > 0.3 ||
+            
+            // Check for very low entropy (indicating repetitive content)
+            entropy < 2.0 ||
+            
+            // Check for spam phrases
+            this.spamPhrases.some(phrase => 
+                sanitizedText.toLowerCase().includes(phrase.toLowerCase())
+            ) ||
+            
+            // Check for URLs, emails, and phone numbers (if not allowed)
+            (!isComment && (
+                this.urlPattern.test(sanitizedText) ||
+                this.emailPattern.test(sanitizedText) ||
+                this.phonePattern.test(sanitizedText)
+            ))
+        );
+        
+        return isSpam;
+    }
 };
 
-// Generate random nickname
-const generateNickname = () => {
-    const adjectives = ['Happy', 'Clever', 'Brave', 'Gentle', 'Kind', 'Swift'];
-    const nouns = ['Panda', 'Fox', 'Eagle', 'Dolphin', 'Tiger', 'Owl'];
-    return `${adjectives[Math.floor(Math.random() * adjectives.length)]}${nouns[Math.floor(Math.random() * nouns.length)]}${Math.floor(Math.random() * 1000)}`;
-};
-
-app.patch('/api/thoughts/:id/react', authMiddleware, async (req, res) => {
+// Update the thought creation route with enhanced spam detection
+app.post('/api/thoughts', authMiddleware, async (req, res) => {
     try {
-        const thought = await Thought.findById(req.params.id);
-        if (!thought) {
-            return res.status(404).json({ message: 'Thought not found' });
+        const { title, text, type } = req.body;
+        
+        // Enhanced spam detection
+        if (title && spamDetection.containsSpam(title)) {
+            return res.status(400).json({ message: 'Title contains spam or inappropriate content' });
+        }
+        if (spamDetection.containsSpam(text)) {
+            return res.status(400).json({ message: 'Content contains spam or inappropriate content' });
         }
         
-        const { emoji } = req.body;
-        const userId = req.user.id;
+        // Create thought with author
+        const thought = new Thought({
+            ...req.body,
+            author: req.body.author || generateNickname(),
+            timestamp: Date.now()
+        });
         
-        if (!thought.reactions) {
-            thought.reactions = new Map();
-        }
-
-        let reactions = thought.reactions.get(emoji) || [];
-        const existingReaction = reactions.findIndex(r => r.userId === userId);
-
-        if (existingReaction !== -1) {
-            // Remove reaction if it exists
-            reactions.splice(existingReaction, 1);
-        } else {
-            // Add new reaction
-            reactions.push({ userId, emoji });
-        }
-
-        thought.reactions.set(emoji, reactions);
-        await thought.save();
-        
-        res.json(thought);
+        const newThought = await thought.save();
+        res.status(201).json(newThought);
     } catch (error) {
         res.status(400).json({ message: error.message });
     }
 });
-// Auth Routes
+
+// Password validation middleware
+const validatePassword = (password) => {
+    const minLength = 8;
+    const hasNumber = /\d/.test(password);
+    const hasUpper = /[A-Z]/.test(password);
+    const hasLower = /[a-z]/.test(password);
+    const hasSpecial = /[!@#$%^&*(),.?":{}|<>]/.test(password);
+    
+    return (
+        password.length >= minLength &&
+        hasNumber &&
+        hasUpper &&
+        hasLower &&
+        hasSpecial
+    );
+};
+
+// Update auth routes with password validation
 app.post('/api/auth/register', async (req, res) => {
     try {
         const { username, password, isAdmin } = req.body;
+        
+        // Validate password
+        if (!validatePassword(password)) {
+            return res.status(400).json({
+                message: 'Password must be at least 8 characters and contain uppercase, lowercase, number, and special character'
+            });
+        }
         
         // Check if user exists
         const existingUser = await User.findOne({ username });
@@ -206,11 +197,11 @@ app.post('/api/auth/register', async (req, res) => {
         
         await user.save();
         
-        // Generate token
+        // Generate token with environment-based expiration
         const token = jwt.sign(
             { id: user._id, username: user.username, isAdmin: user.isAdmin },
             process.env.JWT_SECRET,
-            { expiresIn: '24h' }
+            { expiresIn: process.env.JWT_EXPIRATION || '24h' }
         );
         
         res.status(201).json({ token });

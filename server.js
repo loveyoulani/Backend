@@ -15,7 +15,7 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// MongoDB Schemas
+// Modified MongoDB Schemas
 const userSchema = new mongoose.Schema({
     username: { 
         type: String, 
@@ -33,13 +33,25 @@ const userSchema = new mongoose.Schema({
     createdAt: { 
         type: Date, 
         default: Date.now 
+    },
+    // New fields for user preferences
+    viewHistory: [{
+        thoughtId: { type: mongoose.Schema.Types.ObjectId, ref: 'Thought' },
+        timestamp: { type: Date, default: Date.now }
+    }],
+    tagPreferences: {
+        type: Map,
+        of: Number,
+        default: {}
     }
 });
 
 const thoughtSchema = new mongoose.Schema({
     title: { 
-        type: String, 
-        required: true 
+        type: String,
+        required: function() {
+            return this.type === 'story' || this.type === 'poem';
+        }
     },
     text: { 
         type: String, 
@@ -50,6 +62,10 @@ const thoughtSchema = new mongoose.Schema({
         required: true,
         enum: ['thought', 'poem', 'quote', 'story']
     },
+    tags: [{
+        type: String,
+        required: true
+    }],
     author: {
         type: String,
         required: true
@@ -64,7 +80,10 @@ const thoughtSchema = new mongoose.Schema({
     },
     reactions: { 
         type: Map, 
-        of: Number, 
+        of: [{
+            userId: String,
+            emoji: String
+        }],
         default: {} 
     },
     timestamp: { 
@@ -131,6 +150,39 @@ const generateNickname = () => {
     return `${adjectives[Math.floor(Math.random() * adjectives.length)]}${nouns[Math.floor(Math.random() * nouns.length)]}${Math.floor(Math.random() * 1000)}`;
 };
 
+app.patch('/api/thoughts/:id/react', authMiddleware, async (req, res) => {
+    try {
+        const thought = await Thought.findById(req.params.id);
+        if (!thought) {
+            return res.status(404).json({ message: 'Thought not found' });
+        }
+        
+        const { emoji } = req.body;
+        const userId = req.user.id;
+        
+        if (!thought.reactions) {
+            thought.reactions = new Map();
+        }
+
+        let reactions = thought.reactions.get(emoji) || [];
+        const existingReaction = reactions.findIndex(r => r.userId === userId);
+
+        if (existingReaction !== -1) {
+            // Remove reaction if it exists
+            reactions.splice(existingReaction, 1);
+        } else {
+            // Add new reaction
+            reactions.push({ userId, emoji });
+        }
+
+        thought.reactions.set(emoji, reactions);
+        await thought.save();
+        
+        res.json(thought);
+    } catch (error) {
+        res.status(400).json({ message: error.message });
+    }
+});
 // Auth Routes
 app.post('/api/auth/register', async (req, res) => {
     try {
@@ -229,7 +281,7 @@ app.post('/api/thoughts', authMiddleware, async (req, res) => {
     }
 });
 
-app.patch('/api/thoughts/:id/view', async (req, res) => {
+app.patch('/api/thoughts/:id/view', authMiddleware, async (req, res) => {
     try {
         const thought = await Thought.findById(req.params.id);
         if (!thought) {
@@ -238,11 +290,31 @@ app.patch('/api/thoughts/:id/view', async (req, res) => {
         
         thought.views = (thought.views || 0) + 1;
         await thought.save();
+
+        // Update user's view history and tag preferences
+        const user = await User.findById(req.user.id);
+        if (user) {
+            // Update view history
+            user.viewHistory.push({
+                thoughtId: thought._id,
+                timestamp: new Date()
+            });
+
+            // Update tag preferences
+            thought.tags.forEach(tag => {
+                const currentWeight = user.tagPreferences.get(tag) || 0;
+                user.tagPreferences.set(tag, currentWeight + 1);
+            });
+
+            await user.save();
+        }
+
         res.json(thought);
     } catch (error) {
         res.status(400).json({ message: error.message });
     }
 });
+
 
 app.patch('/api/thoughts/:id/react', authMiddleware, async (req, res) => {
     try {
@@ -290,6 +362,38 @@ app.get('/api/admin/dashboard', authMiddleware, adminMiddleware, async (req, res
         res.status(500).json({ message: error.message });
     }
 });
+app.get('/api/thoughts/recommended', authMiddleware, async (req, res) => {
+    try {
+        const user = await User.findById(req.user.id);
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        // Get user's tag preferences
+        const tagPreferences = user.tagPreferences || new Map();
+        
+        // Get recent thoughts
+        const thoughts = await Thought.find().sort({ timestamp: -1 });
+        
+        // Score each thought based on user preferences
+        const scoredThoughts = thoughts.map(thought => {
+            let score = 0;
+            thought.tags.forEach(tag => {
+                score += tagPreferences.get(tag) || 0;
+            });
+            return { thought, score };
+        });
+
+        // Sort by score and return top results
+        const recommended = scoredThoughts
+            .sort((a, b) => b.score - a.score)
+            .map(item => item.thought);
+
+        res.json(recommended);
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+});
 
 // Error handling middleware
 app.use((err, req, res, next) => {
@@ -324,3 +428,4 @@ process.on('SIGTERM', () => {
         process.exit(0);
     });
 });
+module.exports = app;

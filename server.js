@@ -3,15 +3,45 @@ const cors = require('cors');
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const rateLimit = require('express-rate-limit');
-const helmet = require('helmet');
 require('dotenv').config();
 
-// Schema Definitions
+const app = express();
+
+// Middleware
+app.use(cors({
+    origin: '*',
+    methods: ['GET', 'POST', 'PATCH', 'DELETE'],
+    credentials: true
+}));
+app.use(express.json());
+
+// Modified MongoDB Schemas
 const userSchema = new mongoose.Schema({
-    username: { type: String, required: true, unique: true },
-    password: { type: String, required: true },
-    isAdmin: { type: Boolean, default: false },
+    username: { 
+        type: String, 
+        required: true, 
+        unique: true 
+    },
+    password: { 
+        type: String, 
+        required: true 
+    },
+    isAdmin: { 
+        type: Boolean, 
+        default: false 
+    },
+    createdAt: { 
+        type: Date, 
+        default: Date.now 
+    },
+    lastPostTime: {
+        type: Date,
+        default: null
+    },
+    postCount: {
+        type: Number,
+        default: 0
+    },
     viewHistory: [{
         thoughtId: { type: mongoose.Schema.Types.ObjectId, ref: 'Thought' },
         timestamp: { type: Date, default: Date.now }
@@ -19,36 +49,229 @@ const userSchema = new mongoose.Schema({
     tagPreferences: {
         type: Map,
         of: Number,
-        default: new Map()
+        default: {}
     }
-}, { timestamps: true });
+});
 
 const thoughtSchema = new mongoose.Schema({
-    title: { type: String, required: true },
-    text: { type: String, required: true },
-    author: { type: String, required: true },
-    type: { type: String, required: true },
-    tags: [String],
-    views: { type: Number, default: 0 },
-    reactions: {
-        type: Map,
-        of: Number,
-        default: new Map()
+    title: { 
+        type: String,
+        required: function() {
+            return this.type === 'story' || this.type === 'poem';
+        },
+        maxlength: 200
     },
-    timestamp: { type: Date, default: Date.now }
+    text: { 
+        type: String, 
+        required: true,
+        maxlength: 10000
+    },
+    type: { 
+        type: String, 
+        required: true,
+        enum: ['thought', 'poem', 'quote', 'story']
+    },
+    tags: [{
+        type: String,
+        required: true
+    }],
+    author: {
+        type: String,
+        required: true
+    },
+    date: { 
+        type: String, 
+        required: true 
+    },
+    views: { 
+        type: Number, 
+        default: 0 
+    },
+    reactions: { 
+        type: Map, 
+        of: [{
+            userId: String,
+            emoji: String
+        }],
+        default: {} 
+    },
+    timestamp: { 
+        type: Number, 
+        required: true 
+    }
 });
 
 const User = mongoose.model('User', userSchema);
 const Thought = mongoose.model('Thought', thoughtSchema);
 
-// Middleware definitions
+// Enhanced Content Validation
+const contentValidation = {
+    // Check for spam patterns
+    containsSpam: (text) => {
+        if (!text) return false;
+        
+        // Convert to lowercase for case-insensitive checks
+        const lowerText = text.toLowerCase();
+        
+        // Check for URLs
+        const urlRegex = /(https?:\/\/[^\s]+)/g;
+        if (urlRegex.test(text)) return true;
+
+        // Check for email addresses
+        const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+        if (emailRegex.test(text)) return true;
+
+        // Check for phone numbers
+        const phoneRegex = /(\+\d{1,3}[-.]?)?\(?\d{3}\)?[-.]?\d{3}[-.]?\d{4}/g;
+        if (phoneRegex.test(text)) return true;
+
+        // Check for excessive capitalization (more than 70% caps)
+        const capsPercentage = (text.match(/[A-Z]/g) || []).length / text.length;
+        if (text.length > 10 && capsPercentage > 0.7) return true;
+
+        // Check for character repetition (like 'aaaaaa' or '!!!!!!!')
+        if (/(.)\1{7,}/g.test(text)) return true;
+
+        // Check for keyboard smashing patterns
+        if (/[qwfpgjluy]{8,}|[asdheio]{8,}|[zxcvbnm]{8,}/gi.test(text)) return true;
+
+        // Check for excessive punctuation
+        if (/[!?.,]{4,}/g.test(text)) return true;
+
+        // Check for common spam phrases
+        const spamPhrases = [
+            'buy now', 'click here', 'free offer', 'limited time',
+            'make money', 'winner', 'discount', 'subscribe', 'win win',
+            'guarantee', 'double your', 'earn extra', 'extra cash',
+            'free money', 'best price', 'special offer', 'act now',
+            'amazing', 'congratulations', 'credit card', 'free access',
+            'free consultation', 'free gift', 'free hosting', 'free info',
+            'free investment', 'free membership', 'free money', 'free preview',
+            'free quote', 'free trial', 'free website', 'hidden charges',
+            'hot stuff', 'incredible deal', 'info you requested',
+            'interesting proposal', 'limited time', 'new customers only',
+            'offer expires', 'only $', 'order now', 'please read',
+            'satisfaction guaranteed', 'save $', 'save big money',
+            'save up to', 'special promotion'
+        ];
+
+        return spamPhrases.some(phrase => lowerText.includes(phrase));
+    },
+
+    // Check for gibberish text
+    isGibberish: (text) => {
+        if (!text) return false;
+
+        // Calculate entropy (randomness) of the text
+        const calculateEntropy = (str) => {
+            const len = str.length;
+            const frequencies = Array.from(str).reduce((freq, c) => {
+                freq[c] = (freq[c] || 0) + 1;
+                return freq;
+            }, {});
+            
+            return Object.values(frequencies).reduce((entropy, f) => {
+                const p = f / len;
+                return entropy - (p * Math.log2(p));
+            }, 0);
+        };
+
+        // Check consonant-to-vowel ratio
+        const consonantVowelRatio = (str) => {
+            const vowels = str.toLowerCase().match(/[aeiou]/g) || [];
+            const consonants = str.toLowerCase().match(/[bcdfghjklmnpqrstvwxyz]/g) || [];
+            return consonants.length / (vowels.length || 1);
+        };
+
+        // Get word length variance
+        const getWordLengthVariance = (str) => {
+            const words = str.split(/\s+/);
+            if (words.length < 2) return 0;
+            
+            const lengths = words.map(w => w.length);
+            const mean = lengths.reduce((sum, len) => sum + len, 0) / lengths.length;
+            
+            return lengths.reduce((variance, len) => {
+                return variance + Math.pow(len - mean, 2);
+            }, 0) / lengths.length;
+        };
+
+        const entropy = calculateEntropy(text);
+        const ratio = consonantVowelRatio(text);
+        const variance = getWordLengthVariance(text);
+
+        // Flags for potential gibberish
+        const flags = {
+            highEntropy: entropy > 4.2,
+            badConsonantRatio: ratio > 3.5 || ratio < 0.3,
+            lowVariance: variance < 0.5 && text.length > 20,
+            randomCapitalization: (/[A-Z][a-z][A-Z][a-z]/).test(text),
+            repeatedPatterns: (/(.{2,})\1{2,}/g).test(text)
+        };
+
+        // Count how many flags are triggered
+        const flagCount = Object.values(flags).filter(Boolean).length;
+
+        return flagCount >= 2;
+    }
+};
+
+// Content validation middleware
+const validateContent = (req, res, next) => {
+    const { title, text } = req.body;
+    
+    if (title && (contentValidation.containsSpam(title) || contentValidation.isGibberish(title))) {
+        return res.status(400).json({ 
+            message: 'Title contains inappropriate content or spam patterns' 
+        });
+    }
+    
+    if (text && (contentValidation.containsSpam(text) || contentValidation.isGibberish(text))) {
+        return res.status(400).json({ 
+            message: 'Content contains inappropriate content or spam patterns' 
+        });
+    }
+    
+    next();
+};
+
+// Rate limiting middleware
+const rateLimitMiddleware = async (req, res, next) => {
+    try {
+        const user = await User.findById(req.user.id);
+        const now = new Date();
+        const oneMinute = 60 * 1000;
+        
+        if (user.lastPostTime && (now - user.lastPostTime) < oneMinute) {
+            return res.status(429).json({ 
+                message: 'Please wait a minute before posting again' 
+            });
+        }
+        
+        if (user.postCount >= 50) { // Daily limit
+            const oneDayAgo = new Date(now - 24 * 60 * 60 * 1000);
+            if (user.lastPostTime > oneDayAgo) {
+                return res.status(429).json({ 
+                    message: 'Daily posting limit reached' 
+                });
+            }
+            user.postCount = 0;
+        }
+        
+        next();
+    } catch (error) {
+        next(error);
+    }
+};
+
+// Auth Middleware
 const authMiddleware = async (req, res, next) => {
     try {
         const token = req.headers.authorization?.split(' ')[1];
         if (!token) {
-            return res.status(401).json({ message: 'Authentication required' });
+            return res.status(401).json({ message: 'No auth token' });
         }
-
+        
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
         req.user = decoded;
         next();
@@ -57,128 +280,19 @@ const authMiddleware = async (req, res, next) => {
     }
 };
 
-const adminMiddleware = (req, res, next) => {
-    if (!req.user.isAdmin) {
+// Admin Middleware
+const adminMiddleware = async (req, res, next) => {
+    if (!req.user?.isAdmin) {
         return res.status(403).json({ message: 'Admin access required' });
     }
     next();
 };
 
-const app = express();
-
-// Security middleware
-app.use(helmet());
-app.use(rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 100
-}));
-
-app.use(cors({
-    origin: process.env.CORS_ORIGIN || '*',
-    methods: ['GET', 'POST', 'PATCH', 'DELETE'],
-    credentials: true
-}));
-
-app.use(express.json({ limit: '10kb' })); // Limit payload size
-
-// Enhanced spam detection system
-const spamDetection = {
-    repetitivePattern: /(.)\1{4,}/,
-    excessiveCaps: /[A-Z]{5,}/,
-    spamPhrases: [
-        'buy now', 'click here', 'free offer', 'limited time',
-        'make money', 'winner', 'discount', 'subscribe',
-        'order now', 'act now', 'call now', 'apply now',
-        'prescription', 'medication', 'casino', 'loan',
-        'investment', 'bitcoin', 'crypto', 'lottery',
-        'warranty', 'free money', 'work from home'
-    ],
-    urlPattern: /(https?:\/\/[^\s]+)/g,
-    emailPattern: /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g,
-    phonePattern: /(\+\d{1,3}[-.]?)?\(?\d{3}\)?[-.]?\d{3}[-.]?\d{4}/g,
-
-    getCharacterRatios(text) {
-        const total = text.length;
-        if (total === 0) return { caps: 0, special: 0 };
-        
-        const caps = (text.match(/[A-Z]/g) || []).length / total;
-        const special = (text.match(/[^a-zA-Z0-9\s]/g) || []).length / total;
-        
-        return { caps, special };
-    },
-
-    calculateEntropy(text) {
-        const freq = {};
-        for (let char of text) {
-            freq[char] = (freq[char] || 0) + 1;
-        }
-        
-        return Object.values(freq).reduce((entropy, count) => {
-            const p = count / text.length;
-            return entropy - (p * Math.log2(p));
-        }, 0);
-    },
-
-    containsSpam(text, isComment = false) {
-        if (!text || text.trim().length === 0) return false;
-        
-        const allowedPatterns = [
-            /x+d+/i,
-            /l+o+l+/i,
-            /h+a+h+a+/i,
-            /:\)|:\(|:D|:P|XD|<3/
-        ];
-        
-        let sanitizedText = text;
-        allowedPatterns.forEach(pattern => {
-            sanitizedText = sanitizedText.replace(pattern, '');
-        });
-        
-        const ratios = this.getCharacterRatios(sanitizedText);
-        const entropy = this.calculateEntropy(sanitizedText);
-        
-        return (
-            this.repetitivePattern.test(sanitizedText) ||
-            ratios.caps > 0.5 ||
-            ratios.special > 0.3 ||
-            entropy < 2.0 ||
-            this.spamPhrases.some(phrase => 
-                sanitizedText.toLowerCase().includes(phrase.toLowerCase())
-            ) ||
-            (!isComment && (
-                this.urlPattern.test(sanitizedText) ||
-                this.emailPattern.test(sanitizedText) ||
-                this.phonePattern.test(sanitizedText)
-            ))
-        );
-    }
-};
-
-// Password validation
-const validatePassword = (password) => {
-    const minLength = 8;
-    const hasNumber = /\d/.test(password);
-    const hasUpper = /[A-Z]/.test(password);
-    const hasLower = /[a-z]/.test(password);
-    const hasSpecial = /[!@#$%^&*(),.?":{}|<>]/.test(password);
-    
-    return (
-        password.length >= minLength &&
-        hasNumber &&
-        hasUpper &&
-        hasLower &&
-        hasSpecial
-    );
-};
-
-// Utility function for generating nicknames
+// Generate random nickname
 const generateNickname = () => {
-    const adjectives = ['Happy', 'Lucky', 'Sunny', 'Clever', 'Bright', 'Swift'];
-    const nouns = ['Fox', 'Bear', 'Eagle', 'Wolf', 'Lion', 'Tiger'];
-    const randomNum = Math.floor(Math.random() * 1000);
-    
-    return `${adjectives[Math.floor(Math.random() * adjectives.length)]}${
-        nouns[Math.floor(Math.random() * nouns.length)]}${randomNum}`;
+    const adjectives = ['Happy', 'Clever', 'Brave', 'Gentle', 'Kind', 'Swift'];
+    const nouns = ['Panda', 'Fox', 'Eagle', 'Dolphin', 'Tiger', 'Owl'];
+    return `${adjectives[Math.floor(Math.random() * adjectives.length)]}${nouns[Math.floor(Math.random() * nouns.length)]}${Math.floor(Math.random() * 1000)}`;
 };
 
 // Auth Routes
@@ -190,19 +304,16 @@ app.post('/api/auth/register', async (req, res) => {
             return res.status(400).json({ message: 'Username and password are required' });
         }
         
-        if (!validatePassword(password)) {
-            return res.status(400).json({
-                message: 'Password must be at least 8 characters and contain uppercase, lowercase, number, and special character'
-            });
-        }
-        
+        // Check if user exists
         const existingUser = await User.findOne({ username });
         if (existingUser) {
             return res.status(400).json({ message: 'Username already exists' });
         }
         
+        // Hash password
         const hashedPassword = await bcrypt.hash(password, 10);
         
+        // Create user
         const user = new User({
             username,
             password: hashedPassword,
@@ -211,10 +322,11 @@ app.post('/api/auth/register', async (req, res) => {
         
         await user.save();
         
+        // Generate token
         const token = jwt.sign(
             { id: user._id, username: user.username, isAdmin: user.isAdmin },
             process.env.JWT_SECRET,
-            { expiresIn: process.env.JWT_EXPIRATION || '24h' }
+            { expiresIn: '24h' }
         );
         
         res.status(201).json({ token });
@@ -231,20 +343,23 @@ app.post('/api/auth/login', async (req, res) => {
             return res.status(400).json({ message: 'Username and password are required' });
         }
         
+        // Find user
         const user = await User.findOne({ username });
         if (!user) {
             return res.status(401).json({ message: 'Invalid credentials' });
         }
         
+        // Verify password
         const isValidPassword = await bcrypt.compare(password, user.password);
         if (!isValidPassword) {
             return res.status(401).json({ message: 'Invalid credentials' });
         }
         
+        // Generate token
         const token = jwt.sign(
             { id: user._id, username: user.username, isAdmin: user.isAdmin },
             process.env.JWT_SECRET,
-            { expiresIn: process.env.JWT_EXPIRATION || '24h' }
+            { expiresIn: '24h' }
         );
         
         res.json({ token });
@@ -256,50 +371,32 @@ app.post('/api/auth/login', async (req, res) => {
 // Thought Routes
 app.get('/api/thoughts', async (req, res) => {
     try {
-        const page = parseInt(req.query.page) || 1;
-        const limit = parseInt(req.query.limit) || 10;
-        const skip = (page - 1) * limit;
-        
-        const thoughts = await Thought.find()
-            .sort({ timestamp: -1 })
-            .skip(skip)
-            .limit(limit);
-            
-        const total = await Thought.countDocuments();
-        
-        res.json({
-            thoughts,
-            currentPage: page,
-            totalPages: Math.ceil(total / limit),
-            totalThoughts: total
-        });
+        const thoughts = await Thought.find().sort({ timestamp: -1 });
+        res.json(thoughts);
     } catch (error) {
         res.status(500).json({ message: error.message });
     }
 });
 
-app.post('/api/thoughts', authMiddleware, async (req, res) => {
+app.post('/api/thoughts', [authMiddleware, rateLimitMiddleware, validateContent], async (req, res) => {
     try {
-        const { title, text, type, tags = [] } = req.body;
+        const { title, text, type } = req.body;
         
-        if (!title || !text || !type) {
-            return res.status(400).json({ message: 'Title, text, and type are required' });
-        }
-        
-        if (spamDetection.containsSpam(title) || spamDetection.containsSpam(text)) {
-            return res.status(400).json({ message: 'Content contains spam or inappropriate content' });
-        }
-        
+        // Create thought with author
         const thought = new Thought({
-            title,
-            text,
-            type,
-            tags,
+            ...req.body,
             author: req.body.author || generateNickname(),
             timestamp: Date.now()
         });
         
         const newThought = await thought.save();
+        
+        // Update user's post count and time
+        const user = await User.findById(req.user.id);
+        user.lastPostTime = new Date();
+        user.postCount += 1;
+        await user.save();
+        
         res.status(201).json(newThought);
     } catch (error) {
         res.status(400).json({ message: error.message });
@@ -316,17 +413,21 @@ app.patch('/api/thoughts/:id/view', authMiddleware, async (req, res) => {
         thought.views = (thought.views || 0) + 1;
         await thought.save();
 
+        // Update user's view history and tag preferences
         const user = await User.findById(req.user.id);
         if (user) {
-            // Limit view history to last 100 entries
-            user.viewHistory = [
-                ...user.viewHistory.slice(-99),
-                {
-                    thoughtId: thought._id,
-                    timestamp: new Date()
-                }
-            ];
+            // Update view history
+            user.viewHistory.push({
+                thoughtId: thought._id,
+                timestamp: new Date()
+            });
 
+            // Limit view history to last 100 entries
+            if (user.viewHistory.length > 100) {
+                user.viewHistory = user.viewHistory.slice(-100);
+            }
+
+            // Update tag preferences
             thought.tags.forEach(tag => {
                 const currentWeight = user.tagPreferences.get(tag) || 0;
                 user.tagPreferences.set(tag, currentWeight + 1);
@@ -343,54 +444,39 @@ app.patch('/api/thoughts/:id/view', authMiddleware, async (req, res) => {
 
 app.patch('/api/thoughts/:id/react', authMiddleware, async (req, res) => {
     try {
-        const { emoji } = req.body;
-        
-        if (!emoji) {
-            return res.status(400).json({ message: 'Emoji is required' });
-        }
-        
         const thought = await Thought.findById(req.params.id);
         if (!thought) {
             return res.status(404).json({ message: 'Thought not found' });
         }
         
-        thought.reactions.set(emoji, (thought.reactions.get(emoji) || 0) + 1);
+        const { emoji } = req.body;
+        const userId = req.user.id;
+        
+        if (!emoji || typeof emoji !== 'string') {
+            return res.status(400).json({ message: 'Valid emoji is required' });
+        }
+        
+        if (!thought.reactions) {
+            thought.reactions = new Map();
+        }
+
+        let reactions = thought.reactions.get(emoji) || [];
+        const existingReaction = reactions.findIndex(r => r.userId === userId);
+
+        if (existingReaction !== -1) {
+            // Remove reaction if it exists
+            reactions.splice(existingReaction, 1);
+        } else {
+            // Add new reaction
+            reactions.push({ userId, emoji });
+        }
+
+        thought.reactions.set(emoji, reactions);
         await thought.save();
+        
         res.json(thought);
     } catch (error) {
         res.status(400).json({ message: error.message });
-    }
-});
-
-app.get('/api/thoughts/recommended', authMiddleware, async (req, res) => {
-    try {
-        const user = await User.findById(req.user.id);
-        if (!user) {
-            return res.status(404).json({ message: 'User not found' });
-        }
-
-        const page = parseInt(req.query.page) || 1;
-        const limit = parseInt(req.query.limit) || 10;
-        const skip = (page - 1) * limit;
-
-        const thoughts = await Thought.find()
-            .sort({ timestamp: -1 })
-            .skip(skip)
-            .limit(limit);
-        
-        const scoredThoughts = thoughts.map(thought => ({
-            thought,
-            score: thought.tags.reduce((score, tag) => 
-                score + (user.tagPreferences.get(tag) || 0), 0)
-        }));
-
-        const recommended = scoredThoughts
-            .sort((a, b) => b.score - a.score)
-            .map(item => item.thought);
-
-        res.json(recommended);
-    } catch (error) {
-        res.status(500).json({ message: error.message });
     }
 });
 
@@ -409,41 +495,61 @@ app.delete('/api/thoughts/:id', authMiddleware, adminMiddleware, async (req, res
 
 app.get('/api/admin/dashboard', authMiddleware, adminMiddleware, async (req, res) => {
     try {
-        const [totalThoughts, totalUsers, recentThoughts, userStats] = await Promise.all([
-            Thought.countDocuments(),
-            User.countDocuments(),
-            Thought.find()
-                .sort({ timestamp: -1 })
-                .limit(10)
-                .select('title author views timestamp'),
-            User.aggregate([
-                {
-                    $group: {
-                        _id: null,
-                        averageViews: { $avg: { $size: "$viewHistory" } },
-                        totalActiveUsers: {
-                            $sum: {
-                                $cond: [
-                                    { $gt: [{ $size: "$viewHistory" }, 0] },
-                                    1,
-                                    0
-                                ]
-                            }
-                        }
-                    }
-                }
-            ])
-        ]);
-
         const stats = {
-            totalThoughts,
-            totalUsers,
-            recentThoughts,
-            userStats: userStats[0] || { averageViews: 0, totalActiveUsers: 0 },
-            timestamp: new Date()
+            totalThoughts: await Thought.countDocuments(),
+            totalUsers: await User.countDocuments(),
+            recentThoughts: await Thought.find().sort({ timestamp: -1 }).limit(10),
+            spamStats: {
+                lastDayPosts: await Thought.countDocuments({
+                    timestamp: { $gte: Date.now() - 24 * 60 * 60 * 1000 }
+                }),
+                topAuthors: await Thought.aggregate([
+                    { $group: { _id: '$author', count: { $sum: 1 } } },
+                    { $sort: { count: -1 } },
+                    { $limit: 5 }
+                ])
+            }
         };
-
         res.json(stats);
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+});
+
+app.get('/api/thoughts/recommended', authMiddleware, async (req, res) => {
+    try {
+        const user = await User.findById(req.user.id);
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        // Get user's tag preferences
+        const tagPreferences = user.tagPreferences || new Map();
+        
+        // Get recent thoughts excluding those already viewed
+        const viewedThoughtIds = user.viewHistory.map(v => v.thoughtId);
+        const thoughts = await Thought.find({
+            _id: { $nin: viewedThoughtIds }
+        }).sort({ timestamp: -1 });
+        
+        // Score each thought based on user preferences
+        const scoredThoughts = thoughts.map(thought => {
+            let score = 0;
+            thought.tags.forEach(tag => {
+                score += tagPreferences.get(tag) || 0;
+            });
+            // Add small random factor to prevent same order
+            score += Math.random() * 0.1;
+            return { thought, score };
+        });
+
+        // Sort by score and return top results
+        const recommended = scoredThoughts
+            .sort((a, b) => b.score - a.score)
+            .slice(0, 20)  // Limit to top 20
+            .map(item => item.thought);
+
+        res.json(recommended);
     } catch (error) {
         res.status(500).json({ message: error.message });
     }
@@ -452,10 +558,24 @@ app.get('/api/admin/dashboard', authMiddleware, adminMiddleware, async (req, res
 // Error handling middleware
 app.use((err, req, res, next) => {
     console.error(err.stack);
+    
+    // Specific error handling
+    if (err.name === 'ValidationError') {
+        return res.status(400).json({ 
+            message: 'Validation Error', 
+            details: err.errors 
+        });
+    }
+    
+    if (err.name === 'MongoError' && err.code === 11000) {
+        return res.status(409).json({ 
+            message: 'Duplicate key error' 
+        });
+    }
+    
     res.status(500).json({ 
-        message: process.env.NODE_ENV === 'development' 
-            ? err.message 
-            : 'Something went wrong!' 
+        message: 'Something went wrong!',
+        error: process.env.NODE_ENV === 'development' ? err.message : undefined
     });
 });
 
@@ -464,52 +584,27 @@ app.use((req, res) => {
     res.status(404).json({ message: 'Route not found' });
 });
 
-// Graceful shutdown function
-const gracefulShutdown = async () => {
-    console.log('Received shutdown signal. Starting graceful shutdown...');
-    
-    try {
-        // Close MongoDB connection
-        await mongoose.connection.close(false);
-        console.log('MongoDB connection closed.');
-        
-        // Allow ongoing requests to complete (wait for 10 seconds max)
-        const shutdownDelay = 10000;
-        console.log(`Waiting ${shutdownDelay}ms for ongoing requests to complete...`);
-        setTimeout(() => {
-            console.log('Shutting down application...');
-            process.exit(0);
-        }, shutdownDelay);
-    } catch (error) {
-        console.error('Error during shutdown:', error);
-        process.exit(1);
-    }
-};
+const PORT = process.env.PORT || 3000;
 
-// Server startup
-const startServer = async () => {
-    try {
-        await mongoose.connect(process.env.MONGODB_URI, {
-            useNewUrlParser: true,
-            useUnifiedTopology: true
-        });
+// Connect to MongoDB and start server
+mongoose.connect(process.env.MONGODB_URI)
+    .then(() => {
         console.log('Connected to MongoDB');
-
-        const PORT = process.env.PORT || 3000;
         app.listen(PORT, () => {
             console.log(`Server is running on port ${PORT}`);
         });
-    } catch (error) {
-        console.error('Failed to start server:', error);
-        process.exit(1);
-    }
-};
+    })
+    .catch((error) => {
+        console.error('Could not connect to MongoDB:', error);
+    });
 
-// Shutdown handlers
-process.on('SIGTERM', gracefulShutdown);
-process.on('SIGINT', gracefulShutdown);
-
-// Start the server
-startServer();
+// Graceful shutdown
+process.on('SIGTERM', () => {
+    console.log('SIGTERM received. Shutting down gracefully...');
+    mongoose.connection.close(false, () => {
+        console.log('MongoDB connection closed.');
+        process.exit(0);
+    });
+});
 
 module.exports = app;

@@ -573,19 +573,62 @@ app.get('/api/thoughts/recommended', [authMiddleware, paginationMiddleware], asy
             return res.status(404).json({ message: 'User not found' });
         }
 
-        const tagPreferences = user.tagPreferences || new Map();
-        const viewedThoughtIds = user.viewHistory.map(v => v.thoughtId);
-        
+        // Get user's tag preferences and normalize them
+        const tagPreferences = new Map(user.tagPreferences);
+        const maxPreference = Math.max(...Array.from(tagPreferences.values()), 1);
+        tagPreferences.forEach((value, key) => {
+            tagPreferences.set(key, value / maxPreference);
+        });
+
+        // Get recently viewed thought IDs (last 100)
+        const viewedThoughtIds = user.viewHistory
+            .sort((a, b) => b.timestamp - a.timestamp)
+            .slice(0, 100)
+            .map(v => v.thoughtId);
+
+        // Find thoughts not viewed by the user
         const thoughts = await Thought.find({
             _id: { $nin: viewedThoughtIds }
         }).sort({ timestamp: -1 });
-        
-        const scoredThoughts = thoughts.map(thought => ({
-            thought,
-            score: thought.tags.reduce((score, tag) => 
-                score + (tagPreferences.get(tag) || 0), 0) + Math.random() * 0.1
-        }));
 
+        // Score each thought based on multiple factors
+        const scoredThoughts = thoughts.map(thought => {
+            // Calculate tag score
+            let tagScore = 0;
+            thought.tags.forEach(tag => {
+                tagScore += tagPreferences.get(tag) || 0;
+            });
+            tagScore = tagScore / (thought.tags.length || 1); // Normalize by number of tags
+
+            // Calculate recency score (decay over time)
+            const ageInHours = (Date.now() - thought.timestamp) / (1000 * 60 * 60);
+            const recencyScore = Math.exp(-ageInHours / 168); // Week-based decay
+
+            // Calculate popularity score
+            const popularityScore = Math.log(thought.views + 1) / 10;
+
+            // Calculate engagement score based on reactions
+            let reactionCount = 0;
+            thought.reactions.forEach((reactions, emoji) => {
+                reactionCount += reactions.length;
+            });
+            const engagementScore = Math.log(reactionCount + 1) / 5;
+
+            // Combine scores with weights
+            const finalScore = (
+                (tagScore * 0.4) +          // 40% weight to tag preferences
+                (recencyScore * 0.3) +      // 30% weight to recency
+                (popularityScore * 0.2) +    // 20% weight to popularity
+                (engagementScore * 0.1)      // 10% weight to engagement
+            );
+
+            return {
+                thought,
+                score: finalScore + (Math.random() * 0.05) // Small random factor for variety
+            };
+        });
+
+        // Sort by final score and paginate
         const sortedThoughts = scoredThoughts
             .sort((a, b) => b.score - a.score)
             .slice(skip, skip + limit)

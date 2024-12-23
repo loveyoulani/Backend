@@ -368,11 +368,59 @@ app.post('/api/auth/login', async (req, res) => {
     }
 });
 
-// Thought Routes
-app.get('/api/thoughts', async (req, res) => {
+const paginationMiddleware = (req, res, next) => {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 9;
+    
+    req.pagination = {
+        skip: (page - 1) * limit,
+        limit: limit
+    };
+    
+    next();
+};
+
+// Update the GET thoughts route
+app.get('/api/thoughts', paginationMiddleware, async (req, res) => {
     try {
-        const thoughts = await Thought.find().sort({ timestamp: -1 });
-        res.json(thoughts);
+        const { skip, limit } = req.pagination;
+        const filterType = req.query.filterType || 'all';
+        const sortBy = req.query.sortBy || 'newest';
+        
+        // Build query
+        let query = {};
+        if (filterType !== 'all') {
+            query.type = filterType;
+        }
+        
+        // Build sort options
+        let sortOptions = {};
+        switch(sortBy) {
+            case 'oldest':
+                sortOptions = { timestamp: 1 };
+                break;
+            case 'popular':
+                sortOptions = { views: -1 };
+                break;
+            default: // newest
+                sortOptions = { timestamp: -1 };
+        }
+        
+        // Execute query with pagination
+        const thoughts = await Thought.find(query)
+            .sort(sortOptions)
+            .skip(skip)
+            .limit(limit);
+            
+        // Get total count for pagination
+        const totalThoughts = await Thought.countDocuments(query);
+        
+        res.json({
+            thoughts,
+            totalPages: Math.ceil(totalThoughts / limit),
+            currentPage: Math.floor(skip / limit) + 1,
+            hasMore: skip + thoughts.length < totalThoughts
+        });
     } catch (error) {
         res.status(500).json({ message: error.message });
     }
@@ -516,40 +564,39 @@ app.get('/api/admin/dashboard', authMiddleware, adminMiddleware, async (req, res
     }
 });
 
-app.get('/api/thoughts/recommended', authMiddleware, async (req, res) => {
+app.get('/api/thoughts/recommended', [authMiddleware, paginationMiddleware], async (req, res) => {
     try {
+        const { skip, limit } = req.pagination;
         const user = await User.findById(req.user.id);
+        
         if (!user) {
             return res.status(404).json({ message: 'User not found' });
         }
 
-        // Get user's tag preferences
         const tagPreferences = user.tagPreferences || new Map();
-        
-        // Get recent thoughts excluding those already viewed
         const viewedThoughtIds = user.viewHistory.map(v => v.thoughtId);
+        
         const thoughts = await Thought.find({
             _id: { $nin: viewedThoughtIds }
         }).sort({ timestamp: -1 });
         
-        // Score each thought based on user preferences
-        const scoredThoughts = thoughts.map(thought => {
-            let score = 0;
-            thought.tags.forEach(tag => {
-                score += tagPreferences.get(tag) || 0;
-            });
-            // Add small random factor to prevent same order
-            score += Math.random() * 0.1;
-            return { thought, score };
-        });
+        const scoredThoughts = thoughts.map(thought => ({
+            thought,
+            score: thought.tags.reduce((score, tag) => 
+                score + (tagPreferences.get(tag) || 0), 0) + Math.random() * 0.1
+        }));
 
-        // Sort by score and return top results
-        const recommended = scoredThoughts
+        const sortedThoughts = scoredThoughts
             .sort((a, b) => b.score - a.score)
-            .slice(0, 20)  // Limit to top 20
+            .slice(skip, skip + limit)
             .map(item => item.thought);
 
-        res.json(recommended);
+        res.json({
+            thoughts: sortedThoughts,
+            hasMore: skip + sortedThoughts.length < thoughts.length,
+            currentPage: Math.floor(skip / limit) + 1,
+            totalPages: Math.ceil(thoughts.length / limit)
+        });
     } catch (error) {
         res.status(500).json({ message: error.message });
     }

@@ -425,6 +425,18 @@ app.get('/api/thoughts', paginationMiddleware, async (req, res) => {
         res.status(500).json({ message: error.message });
     }
 });
+// Add this new route to your backend
+app.get('/api/thoughts/:id', async (req, res) => {
+    try {
+        const thought = await Thought.findById(req.params.id);
+        if (!thought) {
+            return res.status(404).json({ message: 'Thought not found' });
+        }
+        res.json(thought);
+    } catch (error) {
+        res.status(500).json({ message: error.message });
+    }
+});
 
 app.post('/api/thoughts', [authMiddleware, rateLimitMiddleware, validateContent], async (req, res) => {
     try {

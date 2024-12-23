@@ -7,32 +7,20 @@ require('dotenv').config();
 
 const app = express();
 
-// Enhanced CORS with more secure configuration
+// Middleware
 app.use(cors({
-    origin: process.env.FRONTEND_URL || '*',
+    origin: '*',
     methods: ['GET', 'POST', 'PATCH', 'DELETE'],
-    credentials: true,
-    maxAge: 86400 // Cache preflight requests for 24 hours
+    credentials: true
 }));
-app.use(express.json({ limit: '1mb' })); // Limit payload size
+app.use(express.json());
 
-// Cache-Control middleware
-const cacheControl = (duration) => (req, res, next) => {
-    if (req.method === 'GET') {
-        res.set('Cache-Control', `public, max-age=${duration}`);
-    } else {
-        res.set('Cache-Control', 'no-store');
-    }
-    next();
-};
-
-// Modified MongoDB Schemas with pagination support
+// Modified MongoDB Schemas
 const userSchema = new mongoose.Schema({
     username: { 
         type: String, 
         required: true, 
-        unique: true,
-        index: true // Add index for better query performance
+        unique: true 
     },
     password: { 
         type: String, 
@@ -44,8 +32,7 @@ const userSchema = new mongoose.Schema({
     },
     createdAt: { 
         type: Date, 
-        default: Date.now,
-        index: true // Add index for sorting
+        default: Date.now 
     },
     lastPostTime: {
         type: Date,
@@ -72,30 +59,25 @@ const thoughtSchema = new mongoose.Schema({
         required: function() {
             return this.type === 'story' || this.type === 'poem';
         },
-        maxlength: 200,
-        index: 'text' // Add text index for search
+        maxlength: 200
     },
     text: { 
         type: String, 
         required: true,
-        maxlength: 10000,
-        index: 'text' // Add text index for search
+        maxlength: 10000
     },
     type: { 
         type: String, 
         required: true,
-        enum: ['thought', 'poem', 'quote', 'story'],
-        index: true
+        enum: ['thought', 'poem', 'quote', 'story']
     },
     tags: [{
         type: String,
-        required: true,
-        index: true
+        required: true
     }],
     author: {
         type: String,
-        required: true,
-        index: true
+        required: true
     },
     date: { 
         type: String, 
@@ -103,8 +85,7 @@ const thoughtSchema = new mongoose.Schema({
     },
     views: { 
         type: Number, 
-        default: 0,
-        index: true
+        default: 0 
     },
     reactions: { 
         type: Map, 
@@ -116,31 +97,12 @@ const thoughtSchema = new mongoose.Schema({
     },
     timestamp: { 
         type: Number, 
-        required: true,
-        index: true
+        required: true 
     }
 });
 
-// Add compound indexes for common query patterns
-thoughtSchema.index({ type: 1, timestamp: -1 });
-thoughtSchema.index({ tags: 1, timestamp: -1 });
-
 const User = mongoose.model('User', userSchema);
 const Thought = mongoose.model('Thought', thoughtSchema);
-
-// Enhanced pagination middleware
-const paginationMiddleware = (req, res, next) => {
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 10;
-    const skip = (page - 1) * limit;
-
-    req.pagination = {
-        page,
-        limit,
-        skip
-    };
-    next();
-};
 
 // Enhanced Content Validation
 const contentValidation = {
@@ -407,78 +369,33 @@ app.post('/api/auth/login', async (req, res) => {
 });
 
 // Thought Routes
-app.get('/api/thoughts', paginationMiddleware, cacheControl(300), async (req, res) => {
+app.get('/api/thoughts', async (req, res) => {
     try {
-        const { skip, limit } = req.pagination;
-        const { type, sort, search, tags } = req.query;
-
-        // Build query
-        let query = {};
-        if (type) query.type = type;
-        if (tags) query.tags = { $in: tags.split(',') };
-        if (search) {
-            query.$text = { $search: search };
-        }
-
-        // Build sort options
-        let sortOption = { timestamp: -1 }; // default sort
-        if (sort === 'popular') {
-            sortOption = { views: -1 };
-        } else if (sort === 'reactions') {
-            sortOption = { 'reactions.size': -1 };
-        }
-
-        // Execute query with pagination
-        const thoughts = await Thought.find(query)
-            .sort(sortOption)
-            .skip(skip)
-            .limit(limit + 1) // Get one extra to check if there are more
-            .lean();
-
-        const hasMore = thoughts.length > limit;
-        if (hasMore) thoughts.pop(); // Remove the extra item
-
-        // Get total count for initial load only
-        const total = page === 1 ? await Thought.countDocuments(query) : undefined;
-
-        res.json({
-            thoughts,
-            hasMore,
-            total,
-            page: req.pagination.page
-        });
+        const thoughts = await Thought.find().sort({ timestamp: -1 });
+        res.json(thoughts);
     } catch (error) {
         res.status(500).json({ message: error.message });
     }
 });
 
-// Enhanced thought creation with better validation
 app.post('/api/thoughts', [authMiddleware, rateLimitMiddleware, validateContent], async (req, res) => {
     try {
-        const { title, text, type, tags } = req.body;
+        const { title, text, type } = req.body;
         
-        // Normalize tags
-        const normalizedTags = tags.map(tag => tag.toLowerCase().trim())
-            .filter((tag, index, self) => self.indexOf(tag) === index)
-            .slice(0, 5); // Limit to 5 tags
-
+        // Create thought with author
         const thought = new Thought({
-            title,
-            text,
-            type,
-            tags: normalizedTags,
+            ...req.body,
             author: req.body.author || generateNickname(),
-            date: new Date().toISOString(),
             timestamp: Date.now()
         });
         
         const newThought = await thought.save();
         
         // Update user's post count and time
-        await User.findByIdAndUpdate(req.user.id, {
-            $set: { lastPostTime: new Date() },
-            $inc: { postCount: 1 }
-        });
+        const user = await User.findById(req.user.id);
+        user.lastPostTime = new Date();
+        user.postCount += 1;
+        await user.save();
         
         res.status(201).json(newThought);
     } catch (error) {
@@ -599,52 +516,40 @@ app.get('/api/admin/dashboard', authMiddleware, adminMiddleware, async (req, res
     }
 });
 
-app.get('/api/thoughts/recommended', [authMiddleware, paginationMiddleware], async (req, res) => {
+app.get('/api/thoughts/recommended', authMiddleware, async (req, res) => {
     try {
-        const { skip, limit } = req.pagination;
         const user = await User.findById(req.user.id);
-        
         if (!user) {
             return res.status(404).json({ message: 'User not found' });
         }
 
-        // Get viewed thought IDs
-        const viewedThoughtIds = user.viewHistory.map(v => v.thoughtId);
+        // Get user's tag preferences
+        const tagPreferences = user.tagPreferences || new Map();
         
-        // Get tag preferences
-        const tagPreferences = Array.from(user.tagPreferences || new Map())
-            .sort((a, b) => b[1] - a[1])
-            .slice(0, 10)
-            .map(([tag]) => tag);
-
-        // Find recommendations
-        const recommendations = await Thought.aggregate([
-            { $match: { 
-                _id: { $nin: viewedThoughtIds },
-                tags: { $in: tagPreferences }
-            }},
-            { $addFields: {
-                score: {
-                    $add: [
-                        { $multiply: [{ $size: { $setIntersection: ["$tags", tagPreferences] } }, 2] },
-                        { $divide: ["$views", 100] },
-                        { $divide: [{ $size: "$reactions" }, 10] }
-                    ]
-                }
-            }},
-            { $sort: { score: -1 } },
-            { $skip: skip },
-            { $limit: limit + 1 }
-        ]);
-
-        const hasMore = recommendations.length > limit;
-        if (hasMore) recommendations.pop();
-
-        res.json({
-            thoughts: recommendations,
-            hasMore,
-            page: req.pagination.page
+        // Get recent thoughts excluding those already viewed
+        const viewedThoughtIds = user.viewHistory.map(v => v.thoughtId);
+        const thoughts = await Thought.find({
+            _id: { $nin: viewedThoughtIds }
+        }).sort({ timestamp: -1 });
+        
+        // Score each thought based on user preferences
+        const scoredThoughts = thoughts.map(thought => {
+            let score = 0;
+            thought.tags.forEach(tag => {
+                score += tagPreferences.get(tag) || 0;
+            });
+            // Add small random factor to prevent same order
+            score += Math.random() * 0.1;
+            return { thought, score };
         });
+
+        // Sort by score and return top results
+        const recommended = scoredThoughts
+            .sort((a, b) => b.score - a.score)
+            .slice(0, 20)  // Limit to top 20
+            .map(item => item.thought);
+
+        res.json(recommended);
     } catch (error) {
         res.status(500).json({ message: error.message });
     }
@@ -681,35 +586,25 @@ app.use((req, res) => {
 
 const PORT = process.env.PORT || 3000;
 
-// Connect to MongoDB with corrected settings
-mongoose.connect(process.env.MONGODB_URI, {
-    maxPoolSize: 50,
-    serverSelectionTimeoutMS: 5000,
-    socketTimeoutMS: 45000,
-    family: 4 // Use IPv4, skip trying IPv6
-}).then(() => {
-    console.log('Connected to MongoDB');
-    app.listen(PORT, () => {
-        console.log(`Server is running on port ${PORT}`);
+// Connect to MongoDB and start server
+mongoose.connect(process.env.MONGODB_URI)
+    .then(() => {
+        console.log('Connected to MongoDB');
+        app.listen(PORT, () => {
+            console.log(`Server is running on port ${PORT}`);
+        });
+    })
+    .catch((error) => {
+        console.error('Could not connect to MongoDB:', error);
     });
-}).catch((error) => {
-    console.error('Could not connect to MongoDB:', error);
-});
 
-// Graceful shutdown handler
-const gracefulShutdown = async () => {
-    console.log('Initiating graceful shutdown...');
-    try {
-        await mongoose.connection.close();
+// Graceful shutdown
+process.on('SIGTERM', () => {
+    console.log('SIGTERM received. Shutting down gracefully...');
+    mongoose.connection.close(false, () => {
         console.log('MongoDB connection closed.');
         process.exit(0);
-    } catch (error) {
-        console.error('Error during shutdown:', error);
-        process.exit(1);
-    }
-};
-
-process.on('SIGTERM', gracefulShutdown);
-process.on('SIGINT', gracefulShutdown);
+    });
+});
 
 module.exports = app;

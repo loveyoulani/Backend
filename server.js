@@ -681,11 +681,12 @@ app.use((req, res) => {
 
 const PORT = process.env.PORT || 3000;
 
-// Connect to MongoDB with optimized settings
+// Connect to MongoDB with corrected settings
 mongoose.connect(process.env.MONGODB_URI, {
     maxPoolSize: 50,
-    wtimeoutMS: 2500,
-    maxTimeMS: 5000
+    serverSelectionTimeoutMS: 5000,
+    socketTimeoutMS: 45000,
+    family: 4 // Use IPv4, skip trying IPv6
 }).then(() => {
     console.log('Connected to MongoDB');
     app.listen(PORT, () => {

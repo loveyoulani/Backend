@@ -573,62 +573,75 @@ app.get('/api/thoughts/recommended', [authMiddleware, paginationMiddleware], asy
             return res.status(404).json({ message: 'User not found' });
         }
 
+        // Get all thoughts first to ensure we have content
+        const allThoughts = await Thought.find({}).sort({ timestamp: -1 });
+        
+        // If no thoughts exist, return empty response with proper structure
+        if (!allThoughts.length) {
+            return res.json({
+                thoughts: [],
+                hasMore: false,
+                currentPage: 1,
+                totalPages: 0
+            });
+        }
+
         // Get user's tag preferences and normalize them
         const tagPreferences = new Map(user.tagPreferences);
-        const maxPreference = Math.max(...Array.from(tagPreferences.values()), 1);
+        const maxPreference = Math.max(...Array.from(tagPreferences.values(), 0), 1);
+        
+        // Normalize tag preferences
         tagPreferences.forEach((value, key) => {
             tagPreferences.set(key, value / maxPreference);
         });
 
-        // Get recently viewed thought IDs (last 100)
-        const viewedThoughtIds = user.viewHistory
-            .sort((a, b) => b.timestamp - a.timestamp)
-            .slice(0, 100)
-            .map(v => v.thoughtId);
+        // Get recently viewed thought IDs
+        const viewedThoughtIds = user.viewHistory.map(v => v.thoughtId.toString());
 
-        // Find thoughts not viewed by the user
-        const thoughts = await Thought.find({
-            _id: { $nin: viewedThoughtIds }
-        }).sort({ timestamp: -1 });
+        // Score and sort all thoughts
+        const scoredThoughts = allThoughts.map(thought => {
+            // Base score starts at 1 to ensure all thoughts get some ranking
+            let score = 1;
 
-        // Score each thought based on multiple factors
-        const scoredThoughts = thoughts.map(thought => {
-            // Calculate tag score
-            let tagScore = 0;
-            thought.tags.forEach(tag => {
-                tagScore += tagPreferences.get(tag) || 0;
-            });
-            tagScore = tagScore / (thought.tags.length || 1); // Normalize by number of tags
+            // Tag score: If user has no preferences, all tags are weighted equally
+            const tagScore = thought.tags.reduce((acc, tag) => {
+                return acc + (tagPreferences.get(tag) || 0.5); // Default weight of 0.5 for unknown tags
+            }, 0) / thought.tags.length;
 
-            // Calculate recency score (decay over time)
+            // Recency score (higher for newer posts)
             const ageInHours = (Date.now() - thought.timestamp) / (1000 * 60 * 60);
             const recencyScore = Math.exp(-ageInHours / 168); // Week-based decay
 
-            // Calculate popularity score
+            // Popularity score based on views
             const popularityScore = Math.log(thought.views + 1) / 10;
 
-            // Calculate engagement score based on reactions
+            // Reaction score
             let reactionCount = 0;
-            thought.reactions.forEach((reactions, emoji) => {
+            thought.reactions.forEach(reactions => {
                 reactionCount += reactions.length;
             });
-            const engagementScore = Math.log(reactionCount + 1) / 5;
+            const reactionScore = Math.log(reactionCount + 1) / 5;
 
-            // Combine scores with weights
-            const finalScore = (
-                (tagScore * 0.4) +          // 40% weight to tag preferences
+            // Combine scores
+            score = (
+                (tagScore * 0.4) +          // 40% weight to tags
                 (recencyScore * 0.3) +      // 30% weight to recency
-                (popularityScore * 0.2) +    // 20% weight to popularity
-                (engagementScore * 0.1)      // 10% weight to engagement
+                (popularityScore * 0.2) +    // 20% weight to views
+                (reactionScore * 0.1)        // 10% weight to reactions
             );
 
-            return {
-                thought,
-                score: finalScore + (Math.random() * 0.05) // Small random factor for variety
-            };
+            // Slightly boost unviewed content
+            if (!viewedThoughtIds.includes(thought._id.toString())) {
+                score *= 1.2;
+            }
+
+            // Add small random factor for variety
+            score += Math.random() * 0.1;
+
+            return { thought, score };
         });
 
-        // Sort by final score and paginate
+        // Sort by score and paginate
         const sortedThoughts = scoredThoughts
             .sort((a, b) => b.score - a.score)
             .slice(skip, skip + limit)
@@ -636,12 +649,14 @@ app.get('/api/thoughts/recommended', [authMiddleware, paginationMiddleware], asy
 
         res.json({
             thoughts: sortedThoughts,
-            hasMore: skip + sortedThoughts.length < thoughts.length,
+            hasMore: skip + sortedThoughts.length < allThoughts.length,
             currentPage: Math.floor(skip / limit) + 1,
-            totalPages: Math.ceil(thoughts.length / limit)
+            totalPages: Math.ceil(allThoughts.length / limit)
         });
+
     } catch (error) {
-        res.status(500).json({ message: error.message });
+        console.error('Recommendation error:', error);
+        res.status(500).json({ message: 'Error generating recommendations' });
     }
 });
 

@@ -8,7 +8,6 @@ require('dotenv').config();
 
 const app = express();
 
-const PING_INTERVAL = 14 * 60 * 1000;
 
 // Middleware
 app.use(cors({

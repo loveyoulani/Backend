@@ -3,9 +3,12 @@ const cors = require('cors');
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const https = require('https');
 require('dotenv').config();
 
 const app = express();
+
+const PING_INTERVAL = 14 * 60 * 1000;
 
 // Middleware
 app.use(cors({
@@ -103,6 +106,33 @@ const thoughtSchema = new mongoose.Schema({
 
 const User = mongoose.model('User', userSchema);
 const Thought = mongoose.model('Thought', thoughtSchema);
+
+const PING_INTERVAL = 14 * 60 * 1000; // 14 minutes
+const pingServer = () => {
+    const options = {
+        hostname: process.env.APP_URL || 'your-app-name.onrender.com', // Replace with your actual Render URL
+        path: '/api/ping',
+        method: 'GET'
+    };
+
+    const req = https.request(options, (res) => {
+        console.log(`Ping status: ${res.statusCode}`);
+    });
+
+    req.on('error', (error) => {
+        console.error('Error pinging server:', error);
+    });
+
+    req.end();
+};
+
+// Add ping endpoint
+app.get('/api/ping', (req, res) => {
+    res.status(200).send('pong');
+});
+
+// Start ping interval after server starts
+let pingInterval;
 
 // Enhanced Content Validation
 const contentValidation = {
@@ -609,21 +639,26 @@ app.use((req, res) => {
 
 const PORT = process.env.PORT || 3000;
 
-// Connect to MongoDB and start server
 mongoose.connect(process.env.MONGODB_URI)
     .then(() => {
         console.log('Connected to MongoDB');
         app.listen(PORT, () => {
             console.log(`Server is running on port ${PORT}`);
+            // Start the keep-alive ping
+            pingInterval = setInterval(pingServer, PING_INTERVAL);
         });
     })
     .catch((error) => {
         console.error('Could not connect to MongoDB:', error);
     });
 
-// Graceful shutdown
+// Modified graceful shutdown
 process.on('SIGTERM', () => {
     console.log('SIGTERM received. Shutting down gracefully...');
+    // Clear the ping interval
+    if (pingInterval) {
+        clearInterval(pingInterval);
+    }
     mongoose.connection.close(false, () => {
         console.log('MongoDB connection closed.');
         process.exit(0);

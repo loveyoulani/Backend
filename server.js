@@ -108,10 +108,17 @@ const Thought = mongoose.model('Thought', thoughtSchema);
 
 const PING_INTERVAL = 14 * 60 * 1000; // 14 minutes
 const pingServer = () => {
+    // Remove 'https://' from the URL as it's handled by the options
+    const hostname = (process.env.APP_URL || 'backend-7sk4.onrender.com').replace(/^https?:\/\//, '');
+    
     const options = {
-        hostname: process.env.APP_URL || 'your-app-name.onrender.com', // Replace with your actual Render URL
+        hostname: hostname,
         path: '/api/ping',
-        method: 'GET'
+        method: 'GET',
+        port: 443,
+        headers: {
+            'User-Agent': 'render-ping/1.0',
+        }
     };
 
     const req = https.request(options, (res) => {
@@ -651,17 +658,22 @@ mongoose.connect(process.env.MONGODB_URI)
         console.error('Could not connect to MongoDB:', error);
     });
 
-// Modified graceful shutdown
-process.on('SIGTERM', () => {
+// Modified graceful shutdown with proper async handling
+process.on('SIGTERM', async () => {
     console.log('SIGTERM received. Shutting down gracefully...');
     // Clear the ping interval
     if (pingInterval) {
         clearInterval(pingInterval);
     }
-    mongoose.connection.close(false, () => {
+    try {
+        // Close mongoose connection properly
+        await mongoose.connection.close();
         console.log('MongoDB connection closed.');
         process.exit(0);
-    });
+    } catch (err) {
+        console.error('Error during shutdown:', err);
+        process.exit(1);
+    }
 });
 
 module.exports = app;

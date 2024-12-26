@@ -142,113 +142,116 @@ let pingInterval;
 
 // Enhanced Content Validation
 const contentValidation = {
-    // Check for spam patterns
+    // Comprehensive spam detection
     containsSpam: (text) => {
         if (!text) return false;
         
-        // Convert to lowercase for case-insensitive checks
         const lowerText = text.toLowerCase();
-        
-        // Check for URLs
-        const urlRegex = /(https?:\/\/[^\s]+)/g;
-        if (urlRegex.test(text)) return true;
 
-        // Check for email addresses
-        const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
-        if (emailRegex.test(text)) return true;
-
-        // Check for phone numbers
-        const phoneRegex = /(\+\d{1,3}[-.]?)?\(?\d{3}\)?[-.]?\d{3}[-.]?\d{4}/g;
-        if (phoneRegex.test(text)) return true;
-
-        // Check for excessive capitalization (more than 70% caps)
-        const capsPercentage = (text.match(/[A-Z]/g) || []).length / text.length;
-        if (text.length > 10 && capsPercentage > 0.7) return true;
-
-        // Check for character repetition (like 'aaaaaa' or '!!!!!!!')
-        if (/(.)\1{7,}/g.test(text)) return true;
-
-        // Check for keyboard smashing patterns
-        if (/[qwfpgjluy]{8,}|[asdheio]{8,}|[zxcvbnm]{8,}/gi.test(text)) return true;
-
-        // Check for excessive punctuation
-        if (/[!?.,]{4,}/g.test(text)) return true;
-
-        // Check for common spam phrases
+        // Common spam phrase combinations
         const spamPhrases = [
-            'buy now', 'click here', 'free offer', 'limited time',
-            'make money', 'winner', 'discount', 'subscribe', 'win win',
-            'guarantee', 'double your', 'earn extra', 'extra cash',
-            'free money', 'best price', 'special offer', 'act now',
-            'amazing', 'congratulations', 'credit card', 'free access',
-            'free consultation', 'free gift', 'free hosting', 'free info',
-            'free investment', 'free membership', 'free money', 'free preview',
-            'free quote', 'free trial', 'free website', 'hidden charges',
-            'hot stuff', 'incredible deal', 'info you requested',
-            'interesting proposal', 'limited time', 'new customers only',
-            'offer expires', 'only $', 'order now', 'please read',
-            'satisfaction guaranteed', 'save $', 'save big money',
-            'save up to', 'special promotion'
+            // Marketing/Sales Spam
+            ['buy', 'discount', 'offer', 'sale', 'deal', 'limited', 'exclusive', 'shop', 'price'],
+            ['free', 'gift', 'bonus', 'prize', 'winner', 'won', 'reward', 'claim'],
+            ['guarantee', 'guaranteed', 'promise', 'lifetime', 'satisfaction'],
+            ['urgent', 'act now', 'don\'t wait', 'hurry', 'expires', 'deadline'],
+            
+            // Financial Spam
+            ['money', 'cash', 'dollars', 'profit', 'income', 'earn', 'wealthy', 'rich'],
+            ['investment', 'invest', 'stocks', 'crypto', 'bitcoin', 'trading', 'forex'],
+            ['loan', 'credit', 'debt', 'mortgage', 'refinance', 'insurance'],
+            ['roi', 'return on investment', 'passive income', 'revenue'],
+            
+            // Employment Spam
+            ['work from home', 'remote work', 'be your own boss', 'quit your job'],
+            ['make money online', 'online business', 'side hustle', 'part-time'],
+            ['opportunity', 'opportunities', 'position', 'hiring', 'recruitment'],
+            
+            // Health/Medicine Spam
+            ['weight loss', 'diet', 'fat', 'slim', 'physicians', 'doctors'],
+            ['pills', 'medication', 'medicine', 'prescription', 'pharmacy'],
+            ['cure', 'treatment', 'remedy', 'solution', 'breakthrough'],
+            
+            // Adult Content Spam
+            ['adult', 'dating', 'singles', 'match', 'meet', 'hookup'],
+            ['hot', 'sexy', 'seductive', 'intimate', 'passionate'],
+            
+            // Gambling Spam
+            ['casino', 'poker', 'gambling', 'bet', 'lottery', 'jackpot'],
+            ['slots', 'roulette', 'blackjack', 'bingo', 'wagering'],
+            
+            // Tech Scam Spam
+            ['tech support', 'customer service', 'helpdesk', 'support team'],
+            ['account', 'login', 'password', 'security', 'verify', 'verification'],
+            ['subscription', 'subscribe', 'unsubscribe', 'notification'],
+            
+            // Miscellaneous Spam
+            ['congratulations', 'selected', 'chosen', 'special', 'vip'],
+            ['miracle', 'amazing', 'incredible', 'unbelievable', 'stunning'],
+            ['secret', 'hidden', 'private', 'confidential', 'exclusive'],
+            ['risk-free', 'no risk', 'foolproof', 'proven', 'tested']
         ];
 
-        return spamPhrases.some(phrase => lowerText.includes(phrase));
+        // URL and contact patterns
+        const suspiciousPatterns = {
+            urls: /(?:https?:\/\/[^\s]*\.(?:xyz|tk|pw|cc|fun|link|click|buzz|gb|gq|ml|ga|cf|ws|top|monster|science|party|kim|men|loan|work|racing|date|win|bid|stream|download|xin|vip|name|site|online|icu|cyou|hair|cam|mom|review|group|live|world|today))/gi,
+            emails: /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g,
+            phones: /(?:[\+\(]?[1-9][0-9 .\-\(\)]{8,}[0-9])/g,
+            crypto: /(?:[13][a-km-zA-HJ-NP-Z1-9]{25,34}|0x[a-fA-F0-9]{40}|4[0-9AB][1-9A-HJ-NP-Za-km-z]{93})/g
+        };
+
+        // Check for suspicious patterns
+        for (const [key, pattern] of Object.entries(suspiciousPatterns)) {
+            if (pattern.test(text)) return true;
+        }
+
+        // Check for spam phrase combinations
+        let spamScore = 0;
+        const words = lowerText.split(/\s+/);
+        
+        for (const phraseGroup of spamPhrases) {
+            let groupMatches = 0;
+            for (const phrase of phraseGroup) {
+                if (lowerText.includes(phrase)) {
+                    groupMatches++;
+                }
+            }
+            // If multiple matches from the same group, increase spam score
+            if (groupMatches >= 2) {
+                spamScore += groupMatches;
+            }
+        }
+
+        // Additional spam indicators
+        const indicators = {
+            excessiveCaps: (text.match(/[A-Z]/g) || []).length / text.length > 0.5,
+            repeatedChars: /(.)\1{7,}/g.test(text),
+            excessivePunctuation: /[!?.,]{4,}/g.test(text),
+            suspiciousFormatting: /[*_~]{3,}/g.test(text),
+            numbersAndSymbols: (text.match(/[\d$€£¥%@#*]+/g) || []).length / words.length > 0.3
+        };
+
+        // Check message structure
+        const structureChecks = {
+            shortWithUrl: words.length < 5 && suspiciousPatterns.urls.test(text),
+            repeatedWords: words.some((word, i) => word.length > 3 && word === words[i - 1]),
+            allCapsWords: words.filter(word => word.length > 3 && word === word.toUpperCase()).length > words.length * 0.3
+        };
+
+        // Calculate final spam likelihood
+        let spamLikelihood = spamScore;
+        spamLikelihood += Object.values(indicators).filter(Boolean).length * 2;
+        spamLikelihood += Object.values(structureChecks).filter(Boolean).length * 2;
+
+        // Return true if spam likelihood is too high
+        return spamLikelihood >= 4;
     },
 
-    // Check for gibberish text
-    isGibberish: (text) => {
-        if (!text) return false;
-
-        // Calculate entropy (randomness) of the text
-        const calculateEntropy = (str) => {
-            const len = str.length;
-            const frequencies = Array.from(str).reduce((freq, c) => {
-                freq[c] = (freq[c] || 0) + 1;
-                return freq;
-            }, {});
-            
-            return Object.values(frequencies).reduce((entropy, f) => {
-                const p = f / len;
-                return entropy - (p * Math.log2(p));
-            }, 0);
-        };
-
-        // Check consonant-to-vowel ratio
-        const consonantVowelRatio = (str) => {
-            const vowels = str.toLowerCase().match(/[aeiou]/g) || [];
-            const consonants = str.toLowerCase().match(/[bcdfghjklmnpqrstvwxyz]/g) || [];
-            return consonants.length / (vowels.length || 1);
-        };
-
-        // Get word length variance
-        const getWordLengthVariance = (str) => {
-            const words = str.split(/\s+/);
-            if (words.length < 2) return 0;
-            
-            const lengths = words.map(w => w.length);
-            const mean = lengths.reduce((sum, len) => sum + len, 0) / lengths.length;
-            
-            return lengths.reduce((variance, len) => {
-                return variance + Math.pow(len - mean, 2);
-            }, 0) / lengths.length;
-        };
-
-        const entropy = calculateEntropy(text);
-        const ratio = consonantVowelRatio(text);
-        const variance = getWordLengthVariance(text);
-
-        // Flags for potential gibberish
-        const flags = {
-            highEntropy: entropy > 4.2,
-            badConsonantRatio: ratio > 3.5 || ratio < 0.3,
-            lowVariance: variance < 0.5 && text.length > 20,
-            randomCapitalization: (/[A-Z][a-z][A-Z][a-z]/).test(text),
-            repeatedPatterns: (/(.{2,})\1{2,}/g).test(text)
-        };
-
-        // Count how many flags are triggered
-        const flagCount = Object.values(flags).filter(Boolean).length;
-
-        return flagCount >= 2;
+    // Rate limiting check
+    isRapidPosting: (lastPostTime) => {
+        if (!lastPostTime) return false;
+        const timeSinceLastPost = Date.now() - new Date(lastPostTime).getTime();
+        return timeSinceLastPost < 10000; // 10 seconds between posts
     }
 };
 
@@ -256,15 +259,15 @@ const contentValidation = {
 const validateContent = (req, res, next) => {
     const { title, text } = req.body;
     
-    if (title && (contentValidation.containsSpam(title) || contentValidation.isGibberish(title))) {
+    if (title && contentValidation.containsSpam(title)) {
         return res.status(400).json({ 
-            message: 'Title contains inappropriate content or spam patterns' 
+            message: 'Detected spam patterns in title' 
         });
     }
     
-    if (text && (contentValidation.containsSpam(text) || contentValidation.isGibberish(text))) {
+    if (text && contentValidation.containsSpam(text)) {
         return res.status(400).json({ 
-            message: 'Content contains inappropriate content or spam patterns' 
+            message: 'Detected spam patterns in content' 
         });
     }
     
